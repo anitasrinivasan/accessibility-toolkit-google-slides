@@ -331,35 +331,42 @@ function runTitleGeneratorInternal_() {
       continue;
     }
 
-    // Try to promote a title-like text box into the placeholder
-    var titleLikeShape = findTitleLikeShape_(slide, titlePh);
-    if (titleLikeShape) {
-      copyTextWithFormatting_(titleLikeShape, titlePh);
-      titleLikeShape.remove();
-      var promoted = titlePh.getText().asString().trim();
-      log("Slide " + slideNumber + ': promoted "' + promoted + '" into title placeholder.');
-      stats.promoted++;
-      continue;
-    }
-
-    // No title text found -- ask Claude to generate one
-    log("Slide " + slideNumber + ": generating title with Claude\u2026");
+    // Ask Claude to find an existing title or generate one
+    log("Slide " + slideNumber + ": asking Claude to find or generate title\u2026");
 
     var textContent     = getSlideTextContent_(slide, titlePh);
     var speakerNotes    = getSpeakerNotes_(slide);
     var pageObjectId    = slide.getObjectId();
     var thumbnailBase64 = getSlideThumbnailBase64_(presentationId, pageObjectId);
+    var manifest        = getElementManifestForTitle_(slide, titlePh);
 
-    var suggestedTitle = callClaudeForTitle_(
-      apiKey, textContent, speakerNotes, thumbnailBase64, slideNumber
+    var decision = callClaudeForTitleDecision_(
+      apiKey, manifest, textContent, speakerNotes, thumbnailBase64,
+      slideNumber, titlePh.getObjectId()
     );
 
-    if (suggestedTitle) {
-      titlePh.getText().setText(suggestedTitle);
-      log("Slide " + slideNumber + ': title set to "' + suggestedTitle + '"');
+    if (!decision) {
+      log("Slide " + slideNumber + ": could not get a decision from Claude.");
+      stats.errors++;
+    } else if (decision.action === "promote") {
+      var sourceShape = findShapeByObjectId_(slide, decision.elementId);
+      if (sourceShape) {
+        promoteTitle_(titlePh, sourceShape, decision.titleText);
+        var promoted = titlePh.getText().asString().trim();
+        log("Slide " + slideNumber + ': promoted "' + promoted + '" into title placeholder.');
+        stats.promoted++;
+      } else {
+        // Element not found or not a shape -- use titleText as plain text
+        titlePh.getText().setText(decision.titleText);
+        log("Slide " + slideNumber + ': set title to "' + decision.titleText + '" (source element not found).');
+        stats.generated++;
+      }
+    } else if (decision.action === "generate") {
+      titlePh.getText().setText(decision.title);
+      log("Slide " + slideNumber + ': title set to "' + decision.title + '"');
       stats.generated++;
     } else {
-      log("Slide " + slideNumber + ": could not generate a title.");
+      log("Slide " + slideNumber + ": unexpected response from Claude.");
       stats.errors++;
     }
 
@@ -369,12 +376,11 @@ function runTitleGeneratorInternal_() {
   return stats;
 }
 
-/** Dry-run preview -- shows what the title generator would do. */
+/** Dry-run preview -- shows which slides need titles. */
 function previewMissingTitles() {
-  var slides          = SlidesApp.getActivePresentation().getSlides();
-  var noPlaceholder   = [];
-  var promotable      = [];
-  var needsGeneration = [];
+  var slides        = SlidesApp.getActivePresentation().getSlides();
+  var noPlaceholder = [];
+  var needsTitle    = [];
 
   for (var i = 0; i < slides.length; i++) {
     var slide   = slides[i];
@@ -386,18 +392,12 @@ function previewMissingTitles() {
     }
 
     var existing = titlePh.getText().asString().trim();
-    if (existing.length > 0) continue;
-
-    var titleLike = findTitleLikeShape_(slide, titlePh);
-    if (titleLike) {
-      promotable.push(i + 1);
-    } else {
-      needsGeneration.push(i + 1);
+    if (existing.length === 0) {
+      needsTitle.push(i + 1);
     }
   }
 
-  if (noPlaceholder.length === 0 && promotable.length === 0 &&
-      needsGeneration.length === 0) {
+  if (noPlaceholder.length === 0 && needsTitle.length === 0) {
     SlidesApp.getUi().alert("\uD83C\uDF89 All slides already have titles!");
     return;
   }
@@ -408,14 +408,11 @@ function previewMissingTitles() {
            "Set their layout to \"Title Only\" first.\n" +
            "Slides: " + noPlaceholder.join(", ") + "\n\n";
   }
-  if (promotable.length > 0) {
-    msg += "\uD83D\uDD04 " + promotable.length + " slide(s) have title-like text that " +
-           "will be moved into the title placeholder:\n" +
-           "Slides: " + promotable.join(", ") + "\n\n";
-  }
-  if (needsGeneration.length > 0) {
-    msg += "\uD83E\uDD16 " + needsGeneration.length + " slide(s) need Claude to generate a title:\n" +
-           "Slides: " + needsGeneration.join(", ") + "\n\n";
+  if (needsTitle.length > 0) {
+    msg += "\uD83E\uDD16 " + needsTitle.length + " slide(s) need titles.\n" +
+           "Claude will analyze each slide to find existing title text\n" +
+           "or generate a new title if none exists.\n" +
+           "Slides: " + needsTitle.join(", ") + "\n\n";
   }
   msg += 'Run "Generate missing titles" to fix them.';
 
@@ -436,52 +433,97 @@ function findTitlePlaceholder_(slide) {
   return null;
 }
 
-function findTitleLikeShape_(slide, titlePlaceholder) {
-  var shapes     = slide.getShapes();
-  var pageHeight = SlidesApp.getActivePresentation().getPageHeight();
-  var topThird   = pageHeight / 3;
+/**
+ * Builds a text manifest of all elements on the slide (except the
+ * empty title placeholder), including placeholder type info.
+ * Used in the Claude prompt for title detection.
+ */
+function getElementManifestForTitle_(slide, titlePlaceholder) {
+  var pageElements = slide.getPageElements();
+  var lines = [];
 
-  // First pass: find the typical body font size
-  var bodySizes = [];
-  for (var j = 0; j < shapes.length; j++) {
-    var shape = shapes[j];
-    if (shape.getObjectId() === titlePlaceholder.getObjectId()) continue;
-    var type = shape.getPlaceholderType();
-    if (type === SlidesApp.PlaceholderType.TITLE ||
-        type === SlidesApp.PlaceholderType.CENTERED_TITLE ||
-        type === SlidesApp.PlaceholderType.SUBTITLE) continue;
-    var text = shape.getText().asString().trim();
-    if (!text || text.length < 10) continue;
-    var fontSize = getFirstRunFontSize_(shape);
-    if (fontSize) bodySizes.push(fontSize);
+  for (var i = 0; i < pageElements.length; i++) {
+    var el = pageElements[i];
+    if (el.getObjectId() === titlePlaceholder.getObjectId()) continue;
+
+    var type    = getElementType_(el);
+    var content = getElementContent_(el);
+    var left    = Math.round(el.getLeft());
+    var top     = Math.round(el.getTop());
+    var width   = Math.round(el.getWidth());
+    var height  = Math.round(el.getHeight());
+
+    // Get placeholder type if it's a shape
+    var phType = "NONE";
+    if (el.getPageElementType() === SlidesApp.PageElementType.SHAPE) {
+      var ph = el.asShape().getPlaceholderType();
+      if (ph === SlidesApp.PlaceholderType.TITLE)          phType = "TITLE";
+      else if (ph === SlidesApp.PlaceholderType.CENTERED_TITLE) phType = "CENTERED_TITLE";
+      else if (ph === SlidesApp.PlaceholderType.SUBTITLE)  phType = "SUBTITLE";
+      else if (ph === SlidesApp.PlaceholderType.BODY)      phType = "BODY";
+      else phType = "NONE";
+    }
+
+    lines.push(
+      "- ID: " + el.getObjectId() +
+      " | Type: " + type +
+      " | Placeholder: " + phType +
+      ' | Content: "' + truncate_(content, 80) + '"' +
+      " | Position: left=" + left + "pt, top=" + top + "pt" +
+      " | Size: " + width + "x" + height + "pt"
+    );
   }
-  var typicalBodySize = bodySizes.length > 0 ? mode_(bodySizes) : 0;
 
-  // Second pass: find title-like text box
-  var bestCandidate = null;
-  var bestTop       = Infinity;
+  return lines.join("\n");
+}
 
-  for (var j = 0; j < shapes.length; j++) {
-    var shape = shapes[j];
-    if (shape.getObjectId() === titlePlaceholder.getObjectId()) continue;
-    var type = shape.getPlaceholderType();
-    if (type === SlidesApp.PlaceholderType.TITLE ||
-        type === SlidesApp.PlaceholderType.CENTERED_TITLE ||
-        type === SlidesApp.PlaceholderType.SUBTITLE) continue;
-    var text = shape.getText().asString().trim();
-    if (!text || text.length > 120) continue;
-    var topPos   = shape.getTop();
-    var isBold   = getFirstRunBold_(shape);
-    var fontSize = getFirstRunFontSize_(shape);
-    if (topPos > topThird) continue;
-    var isBigger = (typicalBodySize > 0 && fontSize && fontSize > typicalBodySize);
-    if (!isBold && !isBigger) continue;
-    if (topPos < bestTop) {
-      bestCandidate = shape;
-      bestTop       = topPos;
+/**
+ * Finds a page element by objectId and returns it as a Shape.
+ * Returns null if not found or not a shape.
+ */
+function findShapeByObjectId_(slide, objectId) {
+  var elements = slide.getPageElements();
+  for (var i = 0; i < elements.length; i++) {
+    if (elements[i].getObjectId() === objectId) {
+      if (elements[i].getPageElementType() === SlidesApp.PageElementType.SHAPE) {
+        return elements[i].asShape();
+      }
+      return null;
     }
   }
-  return bestCandidate;
+  return null;
+}
+
+/**
+ * Smart title promotion: extracts titleText from sourceShape
+ * into the title placeholder, handling both whole-element and
+ * partial-extraction cases.
+ */
+function promoteTitle_(titlePh, sourceShape, titleText) {
+  var sourceFullText = sourceShape.getText().asString().trim();
+  var titleTrimmed   = titleText.trim();
+
+  if (sourceFullText === titleTrimmed) {
+    // Case 1: Whole element is the title -- copy with formatting
+    copyTextWithFormatting_(sourceShape, titlePh);
+    sourceShape.remove();
+  } else if (sourceFullText.indexOf(titleTrimmed) !== -1) {
+    // Case 2: Title is part of a larger element -- extract it
+    titlePh.getText().setText(titleTrimmed);
+
+    // Remove the title text from the source, keeping the rest
+    var remaining = sourceFullText.replace(titleTrimmed, "").trim();
+    // Clean up leading/trailing newlines from the removal
+    remaining = remaining.replace(/^\n+/, "").replace(/\n+$/, "");
+    if (remaining.length > 0) {
+      sourceShape.getText().setText(remaining);
+    } else {
+      sourceShape.remove();
+    }
+  } else {
+    // Case 3: titleText doesn't match source text -- use plain text
+    titlePh.getText().setText(titleTrimmed);
+  }
 }
 
 function copyTextWithFormatting_(sourceShape, destShape) {
@@ -532,57 +574,6 @@ function copyTextWithFormatting_(sourceShape, destShape) {
   }
 }
 
-function getFirstRunFontSize_(shape) {
-  try {
-    var paragraphs = shape.getText().getParagraphs();
-    if (paragraphs.length === 0) return null;
-    var runs = paragraphs[0].getRange().getRuns();
-    if (runs.length > 0) {
-      var size = runs[0].getTextStyle().getFontSize();
-      if (size) return size;
-    }
-    var fullText = shape.getText().asString();
-    if (fullText.length > 0) {
-      return shape.getText().getRange(0, 1).getTextStyle().getFontSize();
-    }
-  } catch (e) {}
-  return null;
-}
-
-function getFirstRunBold_(shape) {
-  try {
-    var paragraphs = shape.getText().getParagraphs();
-    if (paragraphs.length === 0) return false;
-    var runs = paragraphs[0].getRange().getRuns();
-    if (runs.length > 0) {
-      var bold = runs[0].getTextStyle().isBold();
-      if (bold === true) return true;
-      if (bold === false) return false;
-    }
-    var fullText = shape.getText().asString();
-    if (fullText.length > 0) {
-      var bold = shape.getText().getRange(0, 1).getTextStyle().isBold();
-      return bold === true;
-    }
-  } catch (e) {}
-  return false;
-}
-
-function mode_(arr) {
-  var counts   = {};
-  var maxCount = 0;
-  var modeVal  = arr[0];
-  for (var i = 0; i < arr.length; i++) {
-    var v = arr[i];
-    counts[v] = (counts[v] || 0) + 1;
-    if (counts[v] > maxCount) {
-      maxCount = counts[v];
-      modeVal  = v;
-    }
-  }
-  return modeVal;
-}
-
 function getSlideTextContent_(slide, titlePlaceholder) {
   var parts  = [];
   var shapes = slide.getShapes();
@@ -624,7 +615,15 @@ function getSlideThumbnailBase64_(presentationId, pageObjectId) {
   }
 }
 
-function callClaudeForTitle_(apiKey, textContent, speakerNotes, thumbnailBase64, slideNumber) {
+/**
+ * Unified Claude call that asks Claude to either FIND an existing
+ * title on the slide or GENERATE a new one.
+ *
+ * Returns: { action: "promote", elementId: "...", titleText: "..." }
+ *       or { action: "generate", title: "..." }
+ *       or null on error.
+ */
+function callClaudeForTitleDecision_(apiKey, manifest, textContent, speakerNotes, thumbnailBase64, slideNumber, titlePhId) {
   var contentParts = [];
 
   if (thumbnailBase64) {
@@ -635,33 +634,43 @@ function callClaudeForTitle_(apiKey, textContent, speakerNotes, thumbnailBase64,
   }
 
   var prompt =
-    "You are helping generate a concise, descriptive title for " +
-    "slide " + slideNumber + " of a presentation. The slide is " +
-    "currently missing its title.\n\n";
-
-  if (textContent) {
-    prompt += "TEXT CONTENT ON THE SLIDE:\n" + textContent + "\n\n";
-  } else {
-    prompt += "(The slide has no body text.)\n\n";
-  }
+    "You are an accessibility expert analyzing slide " + slideNumber +
+    " of a Google Slides presentation.\n\n" +
+    "This slide has an EMPTY title placeholder (ID: " + titlePhId +
+    ") that needs to be filled. A screenshot of the slide is attached above.\n\n" +
+    "Here are all the other elements on this slide:\n\n" +
+    manifest + "\n\n";
 
   if (speakerNotes) {
     prompt += "SPEAKER NOTES:\n" + speakerNotes + "\n\n";
   }
 
-  if (thumbnailBase64) {
-    prompt += "A screenshot of the slide is attached above.\n\n";
-  }
-
   prompt +=
-    "Based on ALL of the above, suggest a single concise title " +
-    "for this slide. The title should:\n" +
+    "TASK: Look at the screenshot and the element list. Determine if any " +
+    "existing element on the slide already serves as the slide's title " +
+    "(i.e., it visually functions as the heading/title, even if it is not " +
+    "in the title placeholder).\n\n" +
+    "Consider text that:\n" +
+    "- Appears prominently at or near the top of the slide\n" +
+    "- Is visually distinct from body text (larger, bolder, different style)\n" +
+    "- Functions as a heading or label for the slide's content\n" +
+    "- Could be in ANY element type: text box, subtitle placeholder, " +
+    "body placeholder, or any other shape\n\n" +
+    "Respond with ONLY a JSON object in one of these two formats:\n\n" +
+    "If you identify an existing element that serves as the title:\n" +
+    '{"action": "promote", "elementId": "<the element\'s ID from the manifest>", ' +
+    '"titleText": "<the exact text that is the title>"}\n\n' +
+    "If no existing element serves as a title, generate a concise descriptive title:\n" +
+    '{"action": "generate", "title": "<your suggested title>"}\n\n' +
+    "Title guidelines (for generated titles only):\n" +
     "- Be descriptive and meaningful (avoid generic titles)\n" +
     "- Be concise \u2014 ideally under 8 words\n" +
     "- Accurately capture the slide's main point\n" +
     "- Work well as an accessibility label for screen readers\n\n" +
-    "Respond with ONLY the title text. No quotes, no explanation, " +
-    "no trailing punctuation unless the title is a question.";
+    "IMPORTANT: If the title text is only PART of an element (e.g., the " +
+    "first line of a body text box), still return that element's ID and " +
+    "set titleText to just the title portion, not the full element text.\n\n" +
+    "Respond with ONLY the JSON object. No markdown fencing, no explanation.";
 
   contentParts.push({ type: "text", text: prompt });
 
@@ -674,7 +683,7 @@ function callClaudeForTitle_(apiKey, textContent, speakerNotes, thumbnailBase64,
     },
     payload: JSON.stringify({
       model: CONFIG.CLAUDE_MODEL,
-      max_tokens: 100,
+      max_tokens: 256,
       messages: [{ role: "user", content: contentParts }]
     }),
     muteHttpExceptions: true
@@ -687,9 +696,12 @@ function callClaudeForTitle_(apiKey, textContent, speakerNotes, thumbnailBase64,
       return null;
     }
     var data = JSON.parse(response.getContentText());
-    return data.content[0].text.trim();
+    var text = data.content[0].text.trim();
+    // Clean up any accidental markdown fencing
+    text = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+    return JSON.parse(text);
   } catch (e) {
-    log("Error calling Claude: " + e.message);
+    log("Error calling Claude for title decision: " + e.message);
     return null;
   }
 }
