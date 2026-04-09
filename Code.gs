@@ -3,18 +3,16 @@
  * ACCESSIBILITY TOOLKIT FOR GOOGLE SLIDES
  * ============================================================
  *
- * Four tools in one script:
+ * Three tools in one script:
  *   1. TITLE GENERATOR  -- fills in missing slide titles
  *   2. READING ORDER    -- fixes the order screen readers
  *                          use to read each slide
  *   3. ALT TEXT         -- writes image descriptions so
  *                          screen readers can describe images
- *   4. LAYOUT FIXER     -- detects and fixes overlapping or
- *                          misaligned elements on each slide
  *
  * RECOMMENDED WORKFLOW:
- *   Run all four in order (the menu has a one-click option).
- *   Titles first -> reading order -> alt text -> layout fixes.
+ *   Run all three in order (the menu has a one-click option).
+ *   Titles first -> reading order second -> alt text last.
  *
  * SETUP (one-time):
  *   1. Open your Google Slides presentation
@@ -59,10 +57,6 @@ const CONFIG = {
   // When true, images that already have alt text are left alone.
   SKIP_EXISTING_ALT_TEXT: true,
 
-  // Minimum margin (in points) from slide edges for the layout fixer.
-  // Default 36pt = 0.5 inch.
-  LAYOUT_SLIDE_MARGIN: 36,
-
   // Show detailed progress in the Apps Script log
   // (View > Executions in the Apps Script editor).
   VERBOSE_LOGGING: true,
@@ -90,9 +84,6 @@ function onOpen() {
     .addSeparator()
     .addItem("3 \u00B7 Generate alt text for images", "runAltTextGenerator")
     .addItem("3 \u00B7 Audit images missing alt text", "auditMissingAltText")
-    .addSeparator()
-    .addItem("4 \u00B7 Fix slide layouts (all slides)", "fixLayoutAllSlides")
-    .addItem("4 \u00B7 Fix slide layout (this slide)", "fixLayoutCurrentSlide")
     .addSeparator()
     .addItem("\u2699 Set API key", "setApiKey")
     .addToUi();
@@ -137,12 +128,11 @@ function getApiKey_() {
 // ===============================================================
 
 /**
- * Runs all four tools in the recommended order:
+ * Runs all three tools in the recommended order:
  *   1. Generate missing titles
  *   2. Remove empty body placeholders
  *   3. Fix reading order on every slide
  *   4. Generate alt text for all images
- *   5. Fix overlapping/misaligned elements
  *
  * Shows a combined summary at the end.
  */
@@ -164,8 +154,7 @@ function runAllFixes() {
       "  1. Generate missing slide titles\n" +
       "  2. Remove empty body placeholders\n" +
       "  3. Fix the reading order on every slide\n" +
-      "  4. Generate alt text for all images\n" +
-      "  5. Fix overlapping/misaligned elements\n\n" +
+      "  4. Generate alt text for all images\n\n" +
       "This may take a few minutes for large decks.\n\n" +
       "Continue?",
     ui.ButtonSet.YES_NO
@@ -176,24 +165,20 @@ function runAllFixes() {
   // Ask the user to confirm they've set layouts
   if (!confirmLayoutsReady_()) return;
 
-  log("\u2550\u2550\u2550 STEP 1 OF 5: GENERATING MISSING TITLES \u2550\u2550\u2550");
+  log("\u2550\u2550\u2550 STEP 1 OF 4: GENERATING MISSING TITLES \u2550\u2550\u2550");
   var titleStats = runTitleGeneratorInternal_();
 
   // -- Step 2: Remove empty body placeholders --
-  log("\n\u2550\u2550\u2550 STEP 2 OF 5: REMOVING EMPTY BODY PLACEHOLDERS \u2550\u2550\u2550");
+  log("\n\u2550\u2550\u2550 STEP 2 OF 4: REMOVING EMPTY BODY PLACEHOLDERS \u2550\u2550\u2550");
   var removedBodies = removeEmptyBodyPlaceholders_();
 
   // -- Step 3: Reading order --
-  log("\n\u2550\u2550\u2550 STEP 3 OF 5: FIXING READING ORDER \u2550\u2550\u2550");
+  log("\n\u2550\u2550\u2550 STEP 3 OF 4: FIXING READING ORDER \u2550\u2550\u2550");
   var orderStats = fixReadingOrderAllSlidesInternal_();
 
   // -- Step 4: Alt text --
-  log("\n\u2550\u2550\u2550 STEP 4 OF 5: GENERATING ALT TEXT \u2550\u2550\u2550");
+  log("\n\u2550\u2550\u2550 STEP 4 OF 4: GENERATING ALT TEXT \u2550\u2550\u2550");
   var altStats = runAltTextGeneratorInternal_();
-
-  // -- Step 5: Layout fixes --
-  log("\n\u2550\u2550\u2550 STEP 5 OF 5: FIXING SLIDE LAYOUTS \u2550\u2550\u2550");
-  var layoutStats = fixLayoutAllSlidesInternal_();
 
   // -- Combined summary --
   var summary =
@@ -212,11 +197,7 @@ function runAllFixes() {
     "ALT TEXT\n" +
     "  Written: " + altStats.processed + "\n" +
     "  Skipped: " + altStats.skipped + "\n" +
-    "  Errors:  " + altStats.errors + "\n\n" +
-    "LAYOUT\n" +
-    "  Fixed:   " + layoutStats.fixed + "\n" +
-    "  Skipped: " + layoutStats.skipped + "\n" +
-    "  Errors:  " + layoutStats.errors +
+    "  Errors:  " + altStats.errors +
     "\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501";
 
   ui.alert("\u267F All Done!", summary, ui.ButtonSet.OK);
@@ -1231,281 +1212,6 @@ function getAltTextFromClaude_(image) {
   }
 
   return altText.trim();
-}
-
-// ===============================================================
-//  TOOL 4: LAYOUT FIXER
-// ===============================================================
-//
-//  Takes a screenshot of each slide, sends it to Claude along
-//  with an element manifest and a layout playbook, and Claude
-//  returns repositioning instructions to fix overlaps, clipping,
-//  and misalignment. A verification pass confirms the fixes.
-// ---------------------------------------------------------------
-
-/** Menu entry: fix layout on the currently selected slide. */
-function fixLayoutCurrentSlide() {
-  var ui = SlidesApp.getUi();
-  try { getApiKey_(); } catch (e) { ui.alert(e.message); return; }
-
-  var presentation = SlidesApp.getActivePresentation();
-  var slide        = presentation.getSelection().getCurrentPage().asSlide();
-  var slideIndex   = getSlideIndex_(presentation, slide);
-
-  try {
-    var result = analyzeAndFixLayout_(presentation, slide, slideIndex);
-    ui.alert("Done", "Slide " + (slideIndex + 1) + ": " + result, ui.ButtonSet.OK);
-  } catch (e) {
-    ui.alert("Error on slide " + (slideIndex + 1) + ": " + e.message);
-  }
-}
-
-/** Menu entry: fix layout on every slide. */
-function fixLayoutAllSlides() {
-  var ui = SlidesApp.getUi();
-  try { getApiKey_(); } catch (e) { ui.alert(e.message); return; }
-
-  var confirm = ui.alert(
-    "Fix slide layouts?",
-    "This will analyze every slide for overlapping or misaligned\n" +
-    "elements and reposition them. Continue?",
-    ui.ButtonSet.YES_NO
-  );
-  if (confirm !== ui.Button.YES) return;
-
-  var stats = fixLayoutAllSlidesInternal_();
-
-  ui.alert(
-    "\u2705 Layout Fixer \u2014 Done!",
-    "Fixed:   " + stats.fixed + "\n" +
-    "Skipped: " + stats.skipped + "\n" +
-    "Errors:  " + stats.errors,
-    ui.ButtonSet.OK
-  );
-}
-
-/** Internal version for "Run All". Returns stats. */
-function fixLayoutAllSlidesInternal_() {
-  var presentation = SlidesApp.getActivePresentation();
-  var slides       = presentation.getSlides();
-  var stats        = { fixed: 0, skipped: 0, errors: 0 };
-
-  for (var i = 0; i < slides.length; i++) {
-    try {
-      var result = analyzeAndFixLayout_(presentation, slides[i], i);
-      if (result.indexOf("Skipped") === 0 || result.indexOf("No fixes") === 0) {
-        stats.skipped++;
-      } else {
-        stats.fixed++;
-      }
-      log("Slide " + (i + 1) + ": " + result);
-    } catch (e) {
-      log("Slide " + (i + 1) + ": LAYOUT ERROR \u2014 " + e.message);
-      stats.errors++;
-    }
-    Utilities.sleep(1000);
-  }
-
-  return stats;
-}
-
-// -- Layout Fixer: core pipeline ---------------------------------
-
-function analyzeAndFixLayout_(presentation, slide, slideIndex) {
-  var elements = getElementMetadata_(slide);
-  if (elements.length < 2) {
-    return "Skipped \u2014 fewer than 2 elements.";
-  }
-
-  var slideWidth  = presentation.getPageWidth();
-  var slideHeight = presentation.getPageHeight();
-
-  // -- Pass 1: Detect and fix layout issues --
-  var thumbnailUrl = getSlideThumbUrl_(presentation, slide, slideIndex);
-  var imageBase64  = fetchImageAsBase64_(thumbnailUrl);
-  var fixes        = getLayoutFixesFromClaude_(imageBase64, elements, slideWidth, slideHeight);
-
-  if (fixes.length === 0) {
-    return "No fixes needed.";
-  }
-
-  applyLayoutFixes_(slide, fixes);
-  log("  Applied " + fixes.length + " fix(es). Running verification\u2026");
-
-  // -- Pass 2: Verify --
-  Utilities.sleep(1500); // let the slide update before re-screenshotting
-  var verifyUrl     = getSlideThumbUrl_(presentation, slide, slideIndex);
-  var verifyBase64  = fetchImageAsBase64_(verifyUrl);
-  var verifyElements = getElementMetadata_(slide); // re-read after moves
-  var extraFixes    = getLayoutVerificationFromClaude_(verifyBase64, verifyElements, slideWidth, slideHeight);
-
-  if (extraFixes.length > 0) {
-    applyLayoutFixes_(slide, extraFixes);
-    log("  Verification found " + extraFixes.length + " additional fix(es).");
-    return "Applied " + (fixes.length + extraFixes.length) + " fixes (including verification).";
-  }
-
-  return "Applied " + fixes.length + " fix(es), verified clean.";
-}
-
-// -- Layout Fixer: apply fixes -----------------------------------
-
-function applyLayoutFixes_(slide, fixes) {
-  var pageElements = slide.getPageElements();
-  var elementMap   = {};
-  for (var i = 0; i < pageElements.length; i++) {
-    elementMap[pageElements[i].getObjectId()] = pageElements[i];
-  }
-
-  for (var i = 0; i < fixes.length; i++) {
-    var fix = fixes[i];
-    var el  = elementMap[fix.id];
-    if (!el) {
-      log("  Warning: element " + fix.id + " not found, skipping.");
-      continue;
-    }
-    if (fix.newLeft !== undefined && fix.newLeft !== null) el.setLeft(fix.newLeft);
-    if (fix.newTop !== undefined && fix.newTop !== null)   el.setTop(fix.newTop);
-    if (fix.newWidth !== undefined && fix.newWidth !== null)   el.setWidth(fix.newWidth);
-    if (fix.newHeight !== undefined && fix.newHeight !== null) el.setHeight(fix.newHeight);
-  }
-}
-
-// -- Layout Fixer: Claude calls ----------------------------------
-
-function getLayoutFixesFromClaude_(imageBase64, elements, slideWidth, slideHeight) {
-  var apiKey = getApiKey_();
-  var margin = CONFIG.LAYOUT_SLIDE_MARGIN;
-
-  var elementList = elements.map(function(el) {
-    return {
-      id:      el.id,
-      type:    el.type,
-      content: truncate_(el.content, 80),
-      left:    Math.round(el.left),
-      top:     Math.round(el.top),
-      width:   Math.round(el.width),
-      height:  Math.round(el.height)
-    };
-  });
-
-  var prompt =
-    "You are a slide layout expert. I am showing you a screenshot of a Google Slides " +
-    "presentation slide along with its element manifest.\n\n" +
-    "SLIDE DIMENSIONS: " + Math.round(slideWidth) + " x " + Math.round(slideHeight) + " points\n" +
-    "MARGIN: " + margin + " points from each edge\n\n" +
-    "ELEMENT MANIFEST:\n" +
-    JSON.stringify(elementList, null, 2) + "\n\n" +
-    "LAYOUT PLAYBOOK \u2014 follow these rules strictly:\n" +
-    "1. TITLE PRIORITY: The title element always owns the top of the slide. " +
-       "If any element overlaps with the title, nudge the title slightly upward " +
-       "OR push the overlapping content downward \u2014 never hide or shrink the title.\n" +
-    "2. NO OVERLAPS: No two elements should overlap. If they do, move the lower-priority " +
-       "element (body text yields to titles, captions yield to body text).\n" +
-    "3. MARGINS: Keep all elements at least " + margin + "pt from each slide edge.\n" +
-    "4. NO CLIPPING: No element should extend beyond the slide boundaries " +
-       "(" + Math.round(slideWidth) + " x " + Math.round(slideHeight) + " pt).\n" +
-    "5. VISUAL HIERARCHY: Title at top, then main content, then supporting content. " +
-       "Maintain top-to-bottom, left-to-right flow.\n" +
-    "6. PRESERVE GROUPINGS: Elements that are visually related (e.g., image + caption) " +
-       "should stay together.\n" +
-    "7. MINIMAL MOVEMENT: Move elements as little as possible to resolve issues. " +
-       "Do not reorganize the whole slide.\n" +
-    "8. PREFER REPOSITIONING: Only resize if an element is clipped by the slide edge " +
-       "and cannot be moved.\n\n" +
-    "TASK: Look at the screenshot and the manifest. Identify ALL overlapping, clipped, " +
-    "or margin-violating elements. Return a JSON array of fixes.\n\n" +
-    "Response format: [{\"id\": \"element_id\", \"newLeft\": 100, \"newTop\": 50}]\n" +
-    "Include \"newWidth\" and/or \"newHeight\" only if resizing is necessary.\n" +
-    "Return [] if no fixes are needed.\n" +
-    "Respond with ONLY the JSON array \u2014 no explanation, no markdown.";
-
-  return callClaudeForLayoutFixes_(apiKey, imageBase64, prompt);
-}
-
-function getLayoutVerificationFromClaude_(imageBase64, elements, slideWidth, slideHeight) {
-  var apiKey = getApiKey_();
-  var margin = CONFIG.LAYOUT_SLIDE_MARGIN;
-
-  var elementList = elements.map(function(el) {
-    return {
-      id:      el.id,
-      type:    el.type,
-      content: truncate_(el.content, 80),
-      left:    Math.round(el.left),
-      top:     Math.round(el.top),
-      width:   Math.round(el.width),
-      height:  Math.round(el.height)
-    };
-  });
-
-  var prompt =
-    "This slide has just had layout fixes applied. Verify the result.\n\n" +
-    "SLIDE DIMENSIONS: " + Math.round(slideWidth) + " x " + Math.round(slideHeight) + " points\n" +
-    "MARGIN: " + margin + " points from each edge\n\n" +
-    "ELEMENT MANIFEST (current positions):\n" +
-    JSON.stringify(elementList, null, 2) + "\n\n" +
-    "Check for any remaining:\n" +
-    "- Overlapping elements\n" +
-    "- Elements clipped by or extending beyond the slide edges\n" +
-    "- Elements violating the " + margin + "pt margin\n" +
-    "- Title not at the top of the slide\n\n" +
-    "Return a JSON array of additional fixes needed: " +
-    "[{\"id\": \"element_id\", \"newLeft\": 100, \"newTop\": 50}]\n" +
-    "Return [] if the layout is clean.\n" +
-    "Respond with ONLY the JSON array \u2014 no explanation, no markdown.";
-
-  return callClaudeForLayoutFixes_(apiKey, imageBase64, prompt);
-}
-
-function callClaudeForLayoutFixes_(apiKey, imageBase64, prompt) {
-  var payload = {
-    model: CONFIG.CLAUDE_MODEL,
-    max_tokens: 2048,
-    messages: [{
-      role: "user",
-      content: [
-        {
-          type: "image",
-          source: { type: "base64", media_type: "image/png", data: imageBase64 }
-        },
-        { type: "text", text: prompt }
-      ]
-    }]
-  };
-
-  var options = {
-    method: "post",
-    contentType: "application/json",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01"
-    },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-
-  var response = UrlFetchApp.fetch(CONFIG.CLAUDE_API_URL, options);
-
-  if (response.getResponseCode() !== 200) {
-    throw new Error("Claude API returned status " + response.getResponseCode() +
-      ": " + response.getContentText());
-  }
-
-  var data = JSON.parse(response.getContentText());
-  var text = data.content[0].text.trim();
-
-  // Clean up any accidental markdown fencing
-  text = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
-
-  try {
-    var fixes = JSON.parse(text);
-    if (!Array.isArray(fixes)) return [];
-    return fixes;
-  } catch (e) {
-    log("  Could not parse layout fixes JSON: " + text);
-    return [];
-  }
 }
 
 // ===============================================================

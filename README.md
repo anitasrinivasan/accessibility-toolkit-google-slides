@@ -1,6 +1,6 @@
 # Accessibility Toolkit for Google Slides
 
-A Google Apps Script that automates four key accessibility fixes for Google Slides presentations, powered by Claude AI.
+A Google Apps Script that automates three key accessibility fixes for Google Slides presentations, powered by Claude AI.
 
 ## Features
 
@@ -9,8 +9,6 @@ A Google Apps Script that automates four key accessibility fixes for Google Slid
 2. **Reading Order Fixer** -- Fixes the order that screen readers use to read each slide. Sends a screenshot and element metadata to Claude, which determines the logical reading order, then rearranges the z-order accordingly.
 
 3. **Alt Text Generator** -- Writes image descriptions so screen readers can describe images. Sends each image to Claude for a concise, meaningful alt text description.
-
-4. **Layout Fixer** -- Detects and fixes overlapping, clipped, or misaligned elements on each slide. Uses Claude's vision to analyze the slide screenshot alongside an element manifest, then repositions elements following a layout playbook (title priority, no overlaps, margin enforcement, minimal movement). Includes a verification pass.
 
 ## Prerequisites
 
@@ -44,7 +42,7 @@ After the page reloads, you'll see a new **"Accessibility"** menu in your toolba
    - Set **slide 1** to the **"Presentation Title"** layout
    - Select **all other slides** in the filmstrip, then **right-click > Apply layout > "Title Only"**
 2. Click **Accessibility > Run all fixes (recommended)**
-3. Confirm the layout step, then the script works through all four tools automatically
+3. Confirm the layout step, then the script works through all three tools automatically
 
 For large decks it may take a few minutes since it processes each slide and image sequentially.
 
@@ -61,12 +59,10 @@ You can also run each tool separately from the menu:
 | Preview reading order (this slide) | Shows proposed order without applying |
 | Generate alt text for images | Writes alt text for all images missing it |
 | Audit images missing alt text | Lists which images need alt text (no edits) |
-| Fix slide layouts (all slides) | Fixes overlapping/misaligned elements on every slide |
-| Fix slide layout (this slide) | Fixes layout on the current slide only |
 
 ## Notes
 
-- The script uses Claude Sonnet for AI-powered features (title generation, reading order analysis, alt text, layout fixing). You can change the model in the `CONFIG` object at the top of the script.
+- The script uses Claude Sonnet for AI-powered features (title generation, reading order analysis, alt text). You can change the model in the `CONFIG` object at the top of the script.
 - API keys are stored securely in Google Apps Script's `PropertiesService` -- they are never embedded in the code.
 - Images larger than 5 MB will be flagged during the pre-flight check and skipped during alt text generation.
 - Using "Title Only" layout (instead of "Title and Body") avoids creating empty body placeholders that clutter the slide for screen readers.
