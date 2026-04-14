@@ -464,14 +464,14 @@ function getElementManifestForTitle_(slide, titlePlaceholder) {
       else phType = "NONE";
     }
 
-    // Use a generous content limit so long titles (e.g., legal
-    // citations) are not truncated and Claude can match them to
-    // what it sees in the screenshot.
+    // Content limit is 120 chars — long enough for legal citations
+    // and full titles, short enough that body paragraphs are clearly
+    // truncated.
     lines.push(
       "- ID: " + el.getObjectId() +
       " | Type: " + type +
       " | Placeholder: " + phType +
-      ' | Content: "' + truncate_(content, 500) + '"' +
+      ' | Content: "' + truncate_(content, 120) + '"' +
       " | Position: left=" + left + "pt, top=" + top + "pt" +
       " | Size: " + width + "x" + height + "pt"
     );
