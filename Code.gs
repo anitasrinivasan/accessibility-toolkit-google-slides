@@ -495,30 +495,81 @@ function findShapeByObjectId_(slide, objectId) {
 }
 
 /**
+ * Normalizes text for robust substring matching. Handles curly
+ * quotes, non-breaking spaces, and whitespace variations that
+ * can cause matching failures between what Claude returns and
+ * what's actually in the source element.
+ */
+function normalizeForTitleMatch_(str) {
+  if (!str) return "";
+  return str
+    .replace(/[\u2018\u2019]/g, "'")    // curly single quotes -> straight
+    .replace(/[\u201C\u201D]/g, '"')    // curly double quotes -> straight
+    .replace(/\u00A0/g, ' ')             // non-breaking space -> regular
+    .replace(/\s+/g, ' ')                // collapse whitespace
+    .trim();
+}
+
+/**
+ * Robustly removes a shape. Falls back to clearing its text if
+ * .remove() fails (e.g., for layout placeholders that Slides
+ * refuses to remove). Cleared BODY/SUBTITLE placeholders will be
+ * caught by removeEmptyBodyPlaceholders_() in the next step.
+ */
+function removeOrClearShape_(shape) {
+  var shapeId = shape.getObjectId();
+  try {
+    shape.remove();
+    return "removed";
+  } catch (e) {
+    try {
+      shape.getText().setText("");
+      log("  .remove() failed for " + shapeId + " (likely layout placeholder) \u2014 text cleared instead");
+      return "cleared";
+    } catch (e2) {
+      log("  Warning: could not clear shape " + shapeId + ": " + e2.message);
+      return "failed";
+    }
+  }
+}
+
+/**
  * Smart title promotion: extracts titleText from sourceShape
  * into the title placeholder, handling both whole-element and
- * partial-extraction cases.
+ * partial-extraction cases. Uses normalized matching to handle
+ * whitespace/unicode differences, and falls back to clearing
+ * the source if .remove() fails on layout placeholders.
  */
 function promoteTitle_(titlePh, sourceShape, titleText) {
   var sourceFullText = sourceShape.getText().asString().trim();
   var titleTrimmed   = titleText.trim();
 
-  if (sourceFullText === titleTrimmed) {
-    // Case 1: Whole element is the title -- copy with formatting
+  var normSource = normalizeForTitleMatch_(sourceFullText);
+  var normTitle  = normalizeForTitleMatch_(titleTrimmed);
+
+  if (normSource === normTitle) {
+    // Case 1: Whole element is the title -- copy with formatting, then remove
     copyTextWithFormatting_(sourceShape, titlePh);
-    sourceShape.remove();
-  } else if (sourceFullText.indexOf(titleTrimmed) !== -1) {
+    removeOrClearShape_(sourceShape);
+  } else if (normSource.indexOf(normTitle) !== -1) {
     // Case 2: Title is part of a larger element -- extract it
     titlePh.getText().setText(titleTrimmed);
 
-    // Remove the title text from the source, keeping the rest
-    var remaining = sourceFullText.replace(titleTrimmed, "").trim();
-    // Clean up leading/trailing newlines from the removal
-    remaining = remaining.replace(/^\n+/, "").replace(/\n+$/, "");
-    if (remaining.length > 0) {
-      sourceShape.getText().setText(remaining);
+    // Try to remove the titleText from the source (keep the rest)
+    var remaining = sourceFullText.replace(titleTrimmed, "");
+    if (remaining === sourceFullText) {
+      // String.replace failed (whitespace/unicode mismatch despite normalized match).
+      // Safe fallback: clear the source entirely -- the title is now in the placeholder.
+      log("  Warning: could not substring-match titleText in source; clearing source entirely");
+      removeOrClearShape_(sourceShape);
     } else {
-      sourceShape.remove();
+      // Clean up leading/trailing whitespace/newlines from the removal
+      remaining = remaining.replace(/^\s+/, "").replace(/\s+$/, "");
+      if (remaining.length > 0) {
+        sourceShape.getText().setText(remaining);
+      } else {
+        removeOrClearShape_(sourceShape);
+      }
     }
   } else {
     // Case 3: titleText doesn't match source text -- use plain text
