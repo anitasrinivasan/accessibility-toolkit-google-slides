@@ -464,11 +464,14 @@ function getElementManifestForTitle_(slide, titlePlaceholder) {
       else phType = "NONE";
     }
 
+    // Use a generous content limit so long titles (e.g., legal
+    // citations) are not truncated and Claude can match them to
+    // what it sees in the screenshot.
     lines.push(
       "- ID: " + el.getObjectId() +
       " | Type: " + type +
       " | Placeholder: " + phType +
-      ' | Content: "' + truncate_(content, 80) + '"' +
+      ' | Content: "' + truncate_(content, 500) + '"' +
       " | Position: left=" + left + "pt, top=" + top + "pt" +
       " | Size: " + width + "x" + height + "pt"
     );
@@ -697,31 +700,39 @@ function callClaudeForTitleDecision_(apiKey, manifest, textContent, speakerNotes
   }
 
   prompt +=
-    "TASK: Look at the screenshot and the element list. Determine if any " +
-    "existing element on the slide already serves as the slide's title " +
-    "(i.e., it visually functions as the heading/title, even if it is not " +
-    "in the title placeholder).\n\n" +
-    "Consider text that:\n" +
-    "- Appears prominently at or near the top of the slide\n" +
-    "- Is visually distinct from body text (larger, bolder, different style)\n" +
-    "- Functions as a heading or label for the slide's content\n" +
-    "- Could be in ANY element type: text box, subtitle placeholder, " +
-    "body placeholder, or any other shape\n\n" +
-    "Respond with ONLY a JSON object in one of these two formats:\n\n" +
-    "If you identify an existing element that serves as the title:\n" +
-    '{"action": "promote", "elementId": "<the element\'s ID from the manifest>", ' +
-    '"titleText": "<the exact text that is the title>"}\n\n' +
-    "If no existing element serves as a title, generate a concise descriptive title:\n" +
-    '{"action": "generate", "title": "<your suggested title>"}\n\n' +
-    "Title guidelines (for generated titles only):\n" +
-    "- Be descriptive and meaningful (avoid generic titles)\n" +
-    "- Be concise \u2014 ideally under 8 words\n" +
-    "- Accurately capture the slide's main point\n" +
-    "- Work well as an accessibility label for screen readers\n\n" +
-    "IMPORTANT: If the title text is only PART of an element (e.g., the " +
-    "first line of a body text box), still return that element's ID and " +
-    "set titleText to just the title portion, not the full element text.\n\n" +
-    "Respond with ONLY the JSON object. No markdown fencing, no explanation.";
+    "TASK: Your primary goal is to find an EXISTING title on the slide " +
+    "and promote it. Only generate a new title as a LAST RESORT when no " +
+    "existing element contains title-like text.\n\n" +
+    "STEP 1 \u2014 LOOK AT THE SCREENSHOT: What text on the slide visually " +
+    "functions as the title or heading? This could be:\n" +
+    "- Bold or large text at the top of the slide\n" +
+    "- A heading, label, or short phrase that introduces the content\n" +
+    "- A case name, citation, or reference (e.g., \"Thaler v. Perlmutter, ...\")\n" +
+    "- Text that is visually distinct from body content\n" +
+    "- Text in ANY element: text box, subtitle placeholder, body placeholder, etc.\n\n" +
+    "STEP 2 \u2014 FIND IT IN THE MANIFEST: If you see a title in the screenshot, " +
+    "it MUST correspond to one of the elements listed in the manifest above. " +
+    "Match by content \u2014 find the element whose Content field contains that text " +
+    "(or starts with it). The Content field shows the full text of each element.\n\n" +
+    "STEP 3 \u2014 DECIDE:\n" +
+    "- If you found a matching element \u2192 return \"promote\" with that element's ID\n" +
+    "- Only if you are CERTAIN no element contains title-like text \u2192 return \"generate\"\n\n" +
+    "CRITICAL RULES:\n" +
+    "- DO NOT generate a new title if the slide already has title-like text. " +
+    "Generating a duplicate causes visual overlap.\n" +
+    "- Long titles (like legal citations) are still valid titles. Don't skip them " +
+    "just because they're long.\n" +
+    "- If the title text is only PART of a larger element (e.g., the first line of " +
+    "a body text box), still return that element's ID and set titleText to just the " +
+    "title portion.\n" +
+    "- If multiple elements could be the title, pick the one that most prominently " +
+    "functions as the slide's heading (usually the topmost, most visually distinct one).\n\n" +
+    "Response format \u2014 ONLY a JSON object, no markdown, no explanation:\n\n" +
+    "To promote an existing element:\n" +
+    '{"action": "promote", "elementId": "<ID from manifest>", ' +
+    '"titleText": "<exact title text>"}\n\n' +
+    "To generate a new title (only when no existing title exists):\n" +
+    '{"action": "generate", "title": "<concise descriptive title, under 12 words>"}';
 
   contentParts.push({ type: "text", text: prompt });
 
