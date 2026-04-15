@@ -40,7 +40,7 @@
 // ===============================================================
 
 const CONFIG = {
-  CLAUDE_MODEL: "claude-3-5-sonnet-latest",
+  CLAUDE_MODEL: "claude-haiku-4-5",
   CLAUDE_API_URL: "https://api.anthropic.com/v1/messages",
 
   // The prompt sent to Claude when generating image alt text.
