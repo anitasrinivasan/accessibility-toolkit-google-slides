@@ -85,6 +85,9 @@ function onOpen() {
     .addItem("3 \u00B7 Generate alt text for images", "runAltTextGenerator")
     .addItem("3 \u00B7 Audit images missing alt text", "auditMissingAltText")
     .addSeparator()
+    .addItem("\uD83E\uDDF9 Remove empty text boxes & placeholders", "removeEmptyElements")
+    .addSeparator()
+    .addItem("\uD83D\uDCCB Show logs", "showLogsSidebar")
     .addItem("\u2699 Set API key", "setApiKey")
     .addToUi();
 }
@@ -156,6 +159,7 @@ function runAllFixes() {
       "  3. Fix the reading order on every slide\n" +
       "  4. Generate alt text for all images\n\n" +
       "This may take a few minutes for large decks.\n\n" +
+      "A log sidebar will open so you can watch progress.\n\n" +
       "Continue?",
     ui.ButtonSet.YES_NO
   );
@@ -165,20 +169,26 @@ function runAllFixes() {
   // Ask the user to confirm they've set layouts
   if (!confirmLayoutsReady_()) return;
 
-  log("\u2550\u2550\u2550 STEP 1 OF 4: GENERATING MISSING TITLES \u2550\u2550\u2550");
-  var titleStats = runTitleGeneratorInternal_();
+  // -- Open the log sidebar so the user can watch progress --
+  startLogSession_();
+  showLogsSidebar();
 
-  // -- Step 2: Remove empty body placeholders --
-  log("\n\u2550\u2550\u2550 STEP 2 OF 4: REMOVING EMPTY BODY PLACEHOLDERS \u2550\u2550\u2550");
-  var removedBodies = removeEmptyBodyPlaceholders_();
+  var titleStats, removedBodies, orderStats, altStats;
+  try {
+    log("\u2550\u2550\u2550 STEP 1 OF 4: GENERATING MISSING TITLES \u2550\u2550\u2550");
+    titleStats = runTitleGeneratorInternal_();
 
-  // -- Step 3: Reading order --
-  log("\n\u2550\u2550\u2550 STEP 3 OF 4: FIXING READING ORDER \u2550\u2550\u2550");
-  var orderStats = fixReadingOrderAllSlidesInternal_();
+    log("\n\u2550\u2550\u2550 STEP 2 OF 4: REMOVING EMPTY BODY PLACEHOLDERS \u2550\u2550\u2550");
+    removedBodies = removeEmptyBodyPlaceholders_();
 
-  // -- Step 4: Alt text --
-  log("\n\u2550\u2550\u2550 STEP 4 OF 4: GENERATING ALT TEXT \u2550\u2550\u2550");
-  var altStats = runAltTextGeneratorInternal_();
+    log("\n\u2550\u2550\u2550 STEP 3 OF 4: FIXING READING ORDER \u2550\u2550\u2550");
+    orderStats = fixReadingOrderAllSlidesInternal_();
+
+    log("\n\u2550\u2550\u2550 STEP 4 OF 4: GENERATING ALT TEXT \u2550\u2550\u2550");
+    altStats = runAltTextGeneratorInternal_();
+  } finally {
+    endLogSession_();
+  }
 
   // -- Combined summary --
   var summary =
@@ -222,7 +232,15 @@ function runTitleGenerator() {
   try { getApiKey_(); } catch (e) { ui.alert(e.message); return; }
   if (!confirmLayoutsReady_()) return;
 
-  var stats = runTitleGeneratorInternal_();
+  startLogSession_();
+  showLogsSidebar();
+
+  var stats;
+  try {
+    stats = runTitleGeneratorInternal_();
+  } finally {
+    endLogSession_();
+  }
 
   ui.alert(
     "\u2705 Title Generator \u2014 Done!",
@@ -811,6 +829,111 @@ function removeEmptyBodyPlaceholders_() {
   return removed;
 }
 
+// ---------------------------------------------------------------
+//  MANUAL CLEANUP: REMOVE ALL EMPTY TEXT BOXES & PLACEHOLDERS
+// ---------------------------------------------------------------
+//
+//  A standalone tool users can run as a final cleanup pass.
+//  Removes empty TITLE/BODY/SUBTITLE/CENTERED_TITLE placeholders
+//  and empty TEXT_BOX shapes. Intentionally CONSERVATIVE: skips
+//  decorative shapes (ovals, rectangles, arrows, etc.) even if
+//  they have no text, to avoid destroying visual elements.
+// ---------------------------------------------------------------
+
+/** Menu entry: remove all empty text boxes and empty placeholders. */
+function removeEmptyElements() {
+  var ui = SlidesApp.getUi();
+
+  var confirm = ui.alert(
+    "Remove empty elements?",
+    "This will scan every slide and remove:\n\n" +
+    "  \u2022 Empty title/body/subtitle placeholders\n" +
+    "  \u2022 Empty text boxes (no text content)\n\n" +
+    "Decorative shapes (ovals, rectangles, arrows, etc.)\n" +
+    "will NOT be removed, even if empty.\n\n" +
+    "Continue?",
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  startLogSession_();
+  showLogsSidebar();
+
+  var stats;
+  try {
+    stats = removeEmptyElementsInternal_();
+  } finally {
+    endLogSession_();
+  }
+
+  ui.alert(
+    "\u2705 Empty Element Cleanup \u2014 Done!",
+    "Empty placeholders removed: " + stats.placeholders + "\n" +
+    "Empty text boxes removed:   " + stats.textBoxes + "\n" +
+    "Could not remove:           " + stats.failed,
+    ui.ButtonSet.OK
+  );
+}
+
+/**
+ * Core cleanup logic. Conservative: only removes text-designated
+ * shapes (placeholders and TEXT_BOX shapes) that have no text.
+ * Leaves all other shape types alone regardless of text content.
+ */
+function removeEmptyElementsInternal_() {
+  var presentation = SlidesApp.getActivePresentation();
+  var slides       = presentation.getSlides();
+  var stats        = { placeholders: 0, textBoxes: 0, failed: 0 };
+
+  for (var i = 0; i < slides.length; i++) {
+    var shapes = slides[i].getShapes();
+
+    // Walk backwards so removing a shape doesn't shift indices
+    for (var j = shapes.length - 1; j >= 0; j--) {
+      var shape = shapes[j];
+      var text  = shape.getText().asString().trim();
+      if (text.length > 0) continue; // Has content, skip
+
+      var placeholderType = shape.getPlaceholderType();
+      var isPlaceholder =
+        placeholderType === SlidesApp.PlaceholderType.TITLE ||
+        placeholderType === SlidesApp.PlaceholderType.CENTERED_TITLE ||
+        placeholderType === SlidesApp.PlaceholderType.BODY ||
+        placeholderType === SlidesApp.PlaceholderType.SUBTITLE;
+
+      var isTextBox = false;
+      try {
+        isTextBox = shape.getShapeType() === SlidesApp.ShapeType.TEXT_BOX;
+      } catch (e) {
+        // Some shapes don't support getShapeType() — treat as not a text box
+      }
+
+      if (!isPlaceholder && !isTextBox) continue; // Decorative, skip
+
+      // Try to remove; fall back to clearing text if it fails
+      try {
+        shape.remove();
+        if (isPlaceholder) {
+          log("Slide " + (i + 1) + ": removed empty placeholder");
+          stats.placeholders++;
+        } else {
+          log("Slide " + (i + 1) + ": removed empty text box");
+          stats.textBoxes++;
+        }
+      } catch (e) {
+        log("Slide " + (i + 1) + ": could not remove empty shape: " + e.message);
+        stats.failed++;
+      }
+    }
+  }
+
+  log("Cleanup complete: " +
+      stats.placeholders + " placeholders, " +
+      stats.textBoxes + " text boxes, " +
+      stats.failed + " failed.");
+  return stats;
+}
+
 // ===============================================================
 //  TOOL 2: READING ORDER FIXER
 // ===============================================================
@@ -846,7 +969,15 @@ function fixReadingOrderAllSlides() {
   );
   if (confirm !== ui.Button.YES) return;
 
-  var stats = fixReadingOrderAllSlidesInternal_();
+  startLogSession_();
+  showLogsSidebar();
+
+  var stats;
+  try {
+    stats = fixReadingOrderAllSlidesInternal_();
+  } finally {
+    endLogSession_();
+  }
 
   ui.alert(
     "\u2705 Reading Order \u2014 Done!",
@@ -1138,7 +1269,15 @@ function runAltTextGenerator() {
   var ui = SlidesApp.getUi();
   try { getApiKey_(); } catch (e) { ui.alert(e.message); return; }
 
-  var stats = runAltTextGeneratorInternal_();
+  startLogSession_();
+  showLogsSidebar();
+
+  var stats;
+  try {
+    stats = runAltTextGeneratorInternal_();
+  } finally {
+    endLogSession_();
+  }
 
   ui.alert(
     "\u2705 Alt Text Generator \u2014 Done!",
@@ -1317,4 +1456,130 @@ function log(message) {
   if (CONFIG.VERBOSE_LOGGING) {
     Logger.log(message);
   }
+  // Also append to the cache-based log buffer so the sidebar can
+  // display it in real time. Failures are silent to avoid breaking
+  // the main script if the cache is unavailable.
+  try {
+    var cache = CacheService.getScriptCache();
+    var raw = cache.get("ACC_LOGS");
+    var logs = raw ? JSON.parse(raw) : [];
+    logs.push(String(message));
+    // Cap at 500 entries to stay well under the 100KB cache limit
+    if (logs.length > 500) logs = logs.slice(-500);
+    cache.put("ACC_LOGS", JSON.stringify(logs), 3600); // 1 hour TTL
+  } catch (e) {
+    // Silent fail
+  }
 }
+
+// ===============================================================
+//  LOG SIDEBAR (live progress display)
+// ===============================================================
+//
+//  Opens an HTML sidebar that polls the cache for new log entries.
+//  log() writes each message to CacheService, and the sidebar's
+//  JavaScript fetches new entries every ~800ms via google.script.run.
+// ---------------------------------------------------------------
+
+/** Menu entry: open the log sidebar manually. */
+function showLogsSidebar() {
+  var html = HtmlService.createHtmlOutput(LOG_SIDEBAR_HTML_)
+    .setTitle("\u267F Accessibility Logs");
+  SlidesApp.getUi().showSidebar(html);
+}
+
+/**
+ * Called by the sidebar to fetch log entries since `sinceIndex`.
+ * Returns {logs: [new entries], total: N, status: "running"|"done"|"idle"}.
+ */
+function getLogState(sinceIndex) {
+  var cache  = CacheService.getScriptCache();
+  var raw    = cache.get("ACC_LOGS");
+  var logs   = raw ? JSON.parse(raw) : [];
+  var status = cache.get("ACC_STATUS") || "idle";
+  var from   = (typeof sinceIndex === "number" && sinceIndex >= 0) ? sinceIndex : 0;
+  var newLogs = logs.slice(from);
+  return { logs: newLogs, total: logs.length, status: status };
+}
+
+/** Clear the log buffer and mark a new run as started. */
+function startLogSession_() {
+  var cache = CacheService.getScriptCache();
+  cache.remove("ACC_LOGS");
+  cache.put("ACC_STATUS", "running", 3600);
+}
+
+/** Mark the current run as finished. */
+function endLogSession_() {
+  var cache = CacheService.getScriptCache();
+  cache.put("ACC_STATUS", "done", 3600);
+}
+
+/**
+ * HTML content for the live log sidebar. Inlined here so the whole
+ * script can still be pasted as a single file into Apps Script.
+ * Polls getLogState(lastCount) every 800ms and appends new entries.
+ */
+var LOG_SIDEBAR_HTML_ =
+  '<!DOCTYPE html>' +
+  '<html><head><base target="_top">' +
+  '<style>' +
+  '  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; margin: 0; padding: 8px; background: #fafafa; }' +
+  '  #status { padding: 6px 10px; font-weight: 600; border-radius: 4px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }' +
+  '  #status.running { background: #fff3cd; color: #856404; }' +
+  '  #status.done    { background: #d4edda; color: #155724; }' +
+  '  #status.idle    { background: #e9ecef; color: #495057; }' +
+  '  #logs { font-family: Menlo, Monaco, "Courier New", monospace; font-size: 11px; background: #fff; border: 1px solid #dee2e6; border-radius: 4px; padding: 8px; overflow-y: auto; max-height: calc(100vh - 120px); }' +
+  '  .log-line { padding: 2px 0; white-space: pre-wrap; word-break: break-word; border-bottom: 1px solid #f1f3f5; }' +
+  '  .log-line:last-child { border-bottom: none; }' +
+  '  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #856404; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }' +
+  '  @keyframes spin { to { transform: rotate(360deg); } }' +
+  '  #empty { color: #868e96; font-style: italic; text-align: center; padding: 20px; }' +
+  '</style>' +
+  '</head><body>' +
+  '<div id="status" class="idle">Waiting for activity\u2026</div>' +
+  '<div id="logs"><div id="empty">No log entries yet. Run a tool to see progress here.</div></div>' +
+  '<script>' +
+  '  var lastCount = 0;' +
+  '  var emptyShown = true;' +
+  '  function updateStatus(status) {' +
+  '    var el = document.getElementById("status");' +
+  '    el.className = status;' +
+  '    if (status === "running") {' +
+  '      el.innerHTML = \'<span class="spinner"></span> Running\u2026\';' +
+  '    } else if (status === "done") {' +
+  '      el.textContent = "\u2705 Done";' +
+  '    } else {' +
+  '      el.textContent = "Waiting for activity\u2026";' +
+  '    }' +
+  '  }' +
+  '  function appendLogs(newLogs) {' +
+  '    if (!newLogs || newLogs.length === 0) return;' +
+  '    var logDiv = document.getElementById("logs");' +
+  '    if (emptyShown) { logDiv.innerHTML = ""; emptyShown = false; }' +
+  '    newLogs.forEach(function(line) {' +
+  '      var d = document.createElement("div");' +
+  '      d.className = "log-line";' +
+  '      d.textContent = line;' +
+  '      logDiv.appendChild(d);' +
+  '    });' +
+  '    logDiv.scrollTop = logDiv.scrollHeight;' +
+  '  }' +
+  '  function pollLogs() {' +
+  '    google.script.run' +
+  '      .withSuccessHandler(function(result) {' +
+  '        if (result) {' +
+  '          appendLogs(result.logs);' +
+  '          lastCount = result.total;' +
+  '          updateStatus(result.status);' +
+  '        }' +
+  '        setTimeout(pollLogs, 800);' +
+  '      })' +
+  '      .withFailureHandler(function(err) {' +
+  '        setTimeout(pollLogs, 2000);' +
+  '      })' +
+  '      .getLogState(lastCount);' +
+  '  }' +
+  '  pollLogs();' +
+  '</script>' +
+  '</body></html>';
